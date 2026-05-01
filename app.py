@@ -1,4 +1,6 @@
 import asyncio
+import os
+import yaml
 from agenticblocks.blocks.llm.agent import LLMAgentBlock, AgentInput, AgentOutput
 from agenticblocks.blocks.patterns.code_plan_executor import CodePlanExecutorBlock, CodePlanExecutorInput, CodePlanExecutorOutput
 from utils import chat_history, estado_pedido, print_agent_response
@@ -7,6 +9,18 @@ from agenticblocks.core.graph import WorkflowGraph
 from agenticblocks.runtime.executor import WorkflowExecutor
 import utils
 
+
+def set_env_from_secrets(path: str = "secrets.yaml") -> None:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            secrets = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return
+
+    for key, value in secrets.items():
+        os.environ[str(key)] = str(value)
+
+set_env_from_secrets()
 
 def debug(msg):
     print("+"*100)
@@ -31,26 +45,19 @@ FUNÇÕES DISPONÍVEIS (pré-carregadas, NÃO use import)
 
 # Cardápio e carrinho
   get_cardapio() -> str
-  consultar_item(nome: str) -> str
-  adicionar_item(item: str, quantidade: int = 1) -> str
-  remover_item(item: str, quantidade: int = 1) -> str
+  consultar_item(nome: str) -> int        # retorna quantidade em estoque, 0 se não encontrado
+  adicionar_item(item: str, quantidade: int = 1) -> bool   # True se adicionado com sucesso
+  remover_item(item: str, quantidade: int = 1) -> bool     # True se removido com sucesso
   ver_carrinho() -> str
 
 # Checkout
-  registrar_endereco(endereco: str) -> str
-  registrar_pagamento(forma: str) -> str
-
-# Verificação (use ANTES de fechar o pedido)
-  verificar_endereco() -> str
-    # Retorna exatamente 'endereco_informado' se já registrado, ou 'endereco_ausente'
-  verificar_pagamento() -> str
-    # Retorna exatamente 'pagamento_informado' se já registrado, ou 'pagamento_ausente'
-  status_checkout() -> str
-    # Retorna 'checkout_completo' ou lista o que ainda falta
+  registrar_endereco(endereco: str) -> bool    # True se registrado com sucesso
+  registrar_pagamento(forma: str) -> bool      # True se registrado com sucesso
+  checkout_completo() -> bool                  # True se endereço E pagamento já foram registrados
 
 # Finalização
-  fechar_pedido() -> str
-    # Só deve ser chamada após confirmar endereço E pagamento
+  fechar_pedido() -> int | None
+    # Retorna número do pedido (int) se fechado com sucesso, ou None se faltam dados
 
 # Saída da conversa
   halt() -> str
@@ -64,11 +71,10 @@ FLUXO OBRIGATÓRIO PARA FECHAR PEDIDO
 ═══════════════════════════════════════════════════════
 
 Antes de chamar fechar_pedido(), o código DEVE:
-  1. Chamar verificar_endereco() e checar se o resultado começa com 'endereco_informado'.
-  2. Chamar verificar_pagamento() e checar se o resultado começa com 'pagamento_informado'.
-  3. Se qualquer um estiver ausente, NÃO chamar fechar_pedido(); em vez disso,
+  1. Chamar checkout_completo() para verificar se endereço E pagamento já foram registrados.
+  2. Se retornar False, NÃO chamar fechar_pedido(); em vez disso,
      solicitar ao cliente a informação que falta via print_agent_response().
-  4. Somente quando ambos estiverem informados, chamar fechar_pedido().
+  3. Somente quando checkout_completo() retornar True, chamar fechar_pedido().
 
 Exemplos de mensagens e de código correto correspondente:
 Usuário: quero o cardápio
@@ -80,8 +86,11 @@ código:
 Usuário: Quero um cheeseburger
 código:
     #comeco do codigo
-    resultado = adicionar_item('cheeseburger', 1)
-    print_agent_response(resultado)
+    ok = adicionar_item('cheeseburger', 1)
+    if ok:
+        print_agent_response('Cheeseburger adicionado ao carrinho!')
+    else:
+        print_agent_response('Não foi possível adicionar o cheeseburger. Verifique o estoque.')
     #fim do codigo
 
 Usuário: Quero 2 sucos de laranja e remover 1 cheeseburger
@@ -101,15 +110,21 @@ código:
 Usuário: meu endereço é Rua das Flores, 123
 código:
     #comeco do codigo
-    resultado = registrar_endereco('Rua das Flores, 123')
-    print_agent_response(resultado)
+    ok = registrar_endereco('Rua das Flores, 123')
+    if ok:
+        print_agent_response('Endereço de entrega registrado com sucesso!')
+    else:
+        print_agent_response('Não foi possível registrar o endereço. Por favor, informe novamente.')
     #fim do codigo
 
 Usuário: vou pagar no cartão de crédito
 código:
     #comeco do codigo
-    resultado = registrar_pagamento('cartão de crédito')
-    print_agent_response(resultado)
+    ok = registrar_pagamento('cartão de crédito')
+    if ok:
+        print_agent_response('Forma de pagamento registrada com sucesso!')
+    else:
+        print_agent_response('Não foi possível registrar a forma de pagamento. Por favor, informe novamente.')
     #fim do codigo
 
 Usuário: Endereço: Rua das Flores, 123. Forma de pagamento: dinheiro.
@@ -145,17 +160,14 @@ código:
 Usuário: pode fechar o pedido
 código:
     #comeco do codigo
-    end = verificar_endereco()
-    pag = verificar_pagamento()
-    if end == 'endereco_informado' and pag == 'pagamento_informado':
-        resumo = fechar_pedido()
-        print_agent_response(resumo)
-    elif end != 'endereco_informado' and pag != 'pagamento_informado':
-        print_agent_response('Para fechar o pedido preciso do seu endereço de entrega e da forma de pagamento.')
-    elif end != 'endereco_informado':
-        print_agent_response('Para fechar o pedido preciso do seu endereço de entrega.')
+    if checkout_completo():
+        numero = fechar_pedido()
+        if numero is not None:
+            print_agent_response(f'Pedido #{numero:06d} confirmado! {ver_carrinho()}\nAguardando sua confirmação (sim/ok).')
+        else:
+            print_agent_response('Não foi possível fechar o pedido. Verifique seu carrinho.')
     else:
-        print_agent_response('Para fechar o pedido preciso da sua forma de pagamento.')
+        print_agent_response('Para fechar o pedido preciso do seu endereço de entrega e da forma de pagamento.')
     #fim do codigo
 
 Usuário: sim
@@ -191,15 +203,15 @@ antes chamar as funções de registro é um ERRO GRAVE.
 REGRAS DE COMUNICAÇÃO
 ═══════════════════════════════════════════════════════
 
-1. A última instrução do código DEVE ser print_agent_response(mensagem) em português brasileiro,
-   amigável e direto ao cliente. Nunca use print() simples para a resposta final.
+1. As instruções DEVEM ser print_agent_response(mensagem) em português brasileiro,
+   amigável e direto ao cliente. Nunca use print() simples para a resposta.
 2. Para saudações sem pedido: print_agent_response('Olá! Como posso ajudar?').
 3. Para assuntos fora do escopo: print_agent_response('Desculpe, só posso ajudar com cardápio e pedidos do TasteFast.').
 4. Mensagem ambígua (ex: 'suco de goi'): pergunte antes de agir —
    print_agent_response('Você quis dizer suco de goiaba?').
 5. Mensagem incompreensível: print_agent_response('Não entendi sua solicitação, pode reformular?').
 6. Após fechar_pedido() com sucesso: reproduza o resumo completo e peça confirmação ("sim" ou "ok"). NÃO chame halt() neste momento.
-7. Quando o cliente responder "sim" ou "ok" após o resumo do pedido: chame halt() para encerrar.
+7. Quando o cliente responder "sim" ou "ok" (com ou sem aspas) após o resumo do pedido: chame halt() para encerrar.
 8. Informe o código do pedido antes de mandar a mensagem de finalização.
 Retorne o código sem erros e sem marcações adicionais.
 Nenhum texto extra."""
@@ -246,17 +258,18 @@ def test_end_of_loop(obj: CodePlanExecutorOutput) -> dict:  # noqa: ARG001
 async def main():
     agent = ObservableLLM(
         name="code_generator",
-        model="gemini/gemini-3-flash-preview",
+        model="gemini/gemini-3-flash-preview", #"ollama/ministral-3:14b",
         system_prompt=_SYSTEM_CODE_GENERATOR,
         max_iterations=3,
-        litellm_kwargs={'temperature':0.0}
+        litellm_kwargs={'temperature':0.3, 'num_ctx': 32000}
     )
 
     # Nota: É necessário ter o Docker rodando na máquina para este exemplo funcionar.
     code_planner = CodePlanExecutorBlock(
         executor_agent=agent,
         execution_mode="local",
-        inject_module=[utils]
+        inject_module=[utils],
+        max_entries=10
     )
 
     graph = WorkflowGraph()
